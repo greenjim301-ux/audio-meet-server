@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Audio Meet – Test Page</title>
+  <style>
+    body  { font-family: sans-serif; padding: 2em; max-width: 700px; }
+    button { margin: 0.4em; padding: 0.5em 1.4em; font-size: 1em; }
+    audio  { display: block; margin: 1em 0; width: 100%; }
+    #log  { white-space: pre-wrap; background: #f4f4f4; padding: 1em;
+            border: 1px solid #ccc; height: 22em; overflow-y: auto; font-size: 0.85em; }
+  </style>
+</head>
+<body>
+  <h2>Audio Meet – Test Page</h2>
+  <button id="btnStart">Start</button>
+  <button id="btnStop" disabled>Stop</button>
+  <audio id="playback" autoplay controls></audio>
+  <div id="log"></div>
+
+<script>
+const SERVER_API = "http://127.0.0.1:8080";
+const ZLM_API    = "http://127.0.0.1:11080/index/api";
+const SECRET     = "PCFL9DfWk9kuDhej5XcowCh67jvJ8tiC";
+const SIGN       = "41db35390ddad33f83944f44b8b75ded";
+
+let meetId     = null;
+let whipPc     = null;
+let whipStream = null;
+let whepPc     = null;
+
+// ---------------------------------------------------------------------------
+// Logging
+// ---------------------------------------------------------------------------
+
+function log(msg) {
+  const el = document.getElementById("log");
+  el.textContent += new Date().toISOString().slice(11, 23) + "  " + msg + "\n";
+  el.scrollTop = el.scrollHeight;
+}
+
+// ---------------------------------------------------------------------------
+// REST helpers
+// ---------------------------------------------------------------------------
+
+async function zlmGet(path, params = {}) {
+  const url = new URL(ZLM_API + path);
+  url.searchParams.set("secret", SECRET);
+  for (const [k, v] of Object.entries(params)) url.searchParams.set(k, String(v));
+  const resp = await fetch(url.toString());
+  if (!resp.ok) throw new Error(`ZLM HTTP ${resp.status}: ${path}`);
+  const data = await resp.json();
+  if (data.code !== 0) throw new Error(`ZLM ${path} error ${data.code}: ${data.msg}`);
+  return data;
+}
+
+async function serverGet(path, params = {}) {
+  const url = new URL(SERVER_API + path);
+  for (const [k, v] of Object.entries(params)) url.searchParams.set(k, String(v));
+  const resp = await fetch(url.toString());
+  if (!resp.ok) throw new Error(`Server HTTP ${resp.status}: ${path}`);
+  const data = await resp.json();
+  if (data.code !== 0) throw new Error(`Server ${path} error ${data.code}: ${data.msg}`);
+  return data;
+}
+
+// ---------------------------------------------------------------------------
+// ZLM helpers
+// ---------------------------------------------------------------------------
+
+async function openRtpServer(streamId) {
+  const data = await zlmGet("/openRtpServer", {
+    port: 0, tcp_mode: 1, stream_id: streamId, only_audio: 1,
+  });
+  log(`openRtpServer ${streamId} → port=${data.port}`);
+  return data.port;
+}
+
+async function waitForStream(app, stream, timeoutMs = 10000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const data = await zlmGet("/getMediaList", { app, stream });
+    if (Array.isArray(data.data) && data.data.length > 0) {
+      log(`ZLM stream active: ${app}/${stream}`);
+      return;
+    }
+    await new Promise(r => setTimeout(r, 500));
+  }
+  throw new Error(`Timeout waiting for ZLM stream ${app}/${stream}`);
+}
+
+async function startSendRtpTalk(app, stream, ssrc, recvStreamId) {
+  await zlmGet("/startSendRtpTalk", {
+    vhost:          "__defaultVhost__",
+    app,
+    stream,
+    ssrc,
+    recv_stream_id: recvStreamId,
+    pt:             8,
+    use_ps:         0,
+    only_audio:     1,
+  });
+  log(`startSendRtpTalk ${app}/${stream} → recv_stream_id=${recvStreamId}`);
+}
+
+async function startSendRtp(app, stream, ssrc, dstUrl, dstPort) {
+  await zlmGet("/startSendRtp", {
+    vhost:      "__defaultVhost__",
+    app,
+    stream,
+    ssrc,
+    dst_url:    dstUrl,
+    dst_port:   dstPort,
+    pt:         8,
+    use_ps:     0,
+    only_audio: 1,
+    tcp_mode:   1,
+    is_udp:     0,
+  });
+  log(`startSendRtp ${app}/${stream} → ${dstUrl}:${dstPort}`);
+}
+
+// ---------------------------------------------------------------------------
+// PCMA-only SDP filter (from test_whip.html)
+// ---------------------------------------------------------------------------
+
+function filterPCMA(sdp) {
+  return sdp.split("\r\n").filter(line => {
+    if (/^a=(rtpmap|fmtp|rtcp-fb):/.test(line)) {
+      const m = line.match(/^a=(?:rtpmap|fmtp|rtcp-fb):(\d+)/);
+      if (m && m[1] !== "8") return false;
+    }
+    return true;
+  }).map(line => {
+    if (line.startsWith("m=audio")) {
+      const parts = line.split(" ");
+      return parts.slice(0, 3).join(" ") + " 8";
+    }
+    return line;
+  }).join("\r\n");
+}
+
+// ---------------------------------------------------------------------------
+// WHIP push  (mic → ZLM app=rtp stream=part1)
+// ---------------------------------------------------------------------------
+
+async function whipPush() {
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+  log("Microphone acquired");
+
+  const pc = new RTCPeerConnection();
+  pc.oniceconnectionstatechange = () => log(`WHIP ICE: ${pc.iceConnectionState}`);
+  pc.onconnectionstatechange    = () => log(`WHIP PC:  ${pc.connectionState}`);
+
+  for (const track of stream.getAudioTracks()) pc.addTrack(track, stream);
+
+  const offer = await pc.createOffer();
+  offer.sdp = filterPCMA(offer.sdp);
+  await pc.setLocalDescription(offer);
+
+  await new Promise(resolve => {
+    if (pc.iceGatheringState === "complete") return resolve();
+    pc.onicegatheringstatechange = () => { if (pc.iceGatheringState === "complete") resolve(); };
+  });
+
+  const whipUrl = `${ZLM_API}/whip?app=rtp&stream=part1&sign=${SIGN}`;
+  log(`WHIP POST → ${whipUrl}`);
+  const resp = await fetch(whipUrl, {
+    method:  "POST",
+    headers: { "Content-Type": "application/sdp" },
+    body:    pc.localDescription.sdp,
+  });
+  if (!resp.ok) throw new Error(`WHIP HTTP ${resp.status}: ${await resp.text()}`);
+  await pc.setRemoteDescription({ type: "answer", sdp: await resp.text() });
+  log("WHIP answer set");
+
+  // Wait until the PeerConnection is fully connected before starting RtpTalk
+  await new Promise((resolve, reject) => {
+    if (pc.connectionState === "connected") return resolve();
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === "connected") resolve();
+      if (pc.connectionState === "failed")    reject(new Error("WHIP connection failed"));
+    };
+  });
+  log("WHIP connected — rtp/part1 live on ZLM");
+
+  return { pc, stream };
+}
+
+// ---------------------------------------------------------------------------
+// WHEP pull  (ZLM app=rtp stream=part1back → <audio>)
+// ---------------------------------------------------------------------------
+
+async function whepPlay(audioEl) {
+  const pc = new RTCPeerConnection();
+  pc.oniceconnectionstatechange = () => log(`WHEP ICE: ${pc.iceConnectionState}`);
+  pc.onconnectionstatechange    = () => log(`WHEP PC:  ${pc.connectionState}`);
+  pc.ontrack = (ev) => {
+    log("WHEP track received → playback");
+    audioEl.srcObject = ev.streams[0];
+  };
+
+  pc.addTransceiver("audio", { direction: "recvonly" });
+
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+
+  await new Promise(resolve => {
+    if (pc.iceGatheringState === "complete") return resolve();
+    pc.onicegatheringstatechange = () => { if (pc.iceGatheringState === "complete") resolve(); };
+  });
+
+  const whepUrl = `${ZLM_API}/whep?app=rtp&stream=part1back&sign=${SIGN}`;
+  log(`WHEP POST → ${whepUrl}`);
+  const resp = await fetch(whepUrl, {
+    method:  "POST",
+    headers: { "Content-Type": "application/sdp" },
+    body:    pc.localDescription.sdp,
+  });
+  if (!resp.ok) throw new Error(`WHEP HTTP ${resp.status}: ${await resp.text()}`);
+  await pc.setRemoteDescription({ type: "answer", sdp: await resp.text() });
+  log("WHEP answer set — playback starting");
+
+  return pc;
+}
+
+// ---------------------------------------------------------------------------
+// Start
+// ---------------------------------------------------------------------------
+
+document.getElementById("btnStart").onclick = async () => {
+  document.getElementById("btnStart").disabled = true;
+  document.getElementById("btnStop").disabled  = true;
+  try {
+    // 1. Create meeting
+    const meetData = await serverGet("/createAudioMeet");
+    meetId = meetData.data.meetId;
+    log(`createAudioMeet → meetId=${meetId}`);
+
+    // 2. Part 1: open ZLM RTP listener for server TX output, register split participant
+    //    addPassiveAudioMeetPart returns the server's RX listen port (rx_port1)
+    const port1back = await openRtpServer("part1back");
+    const passiveRes1 = await serverGet("/addPassiveAudioMeetPart", {
+      meetId, partId: "part1", ip: "127.0.0.1", port: port1back,
+    });
+    const rxPort1 = passiveRes1.data.port;
+    log(`addPassiveAudioMeetPart part1 ok → server RX port=${rxPort1}`);
+
+    // 3. WHIP: push mic audio to ZLM rtp/part1 and wait for connection
+    const whip = await whipPush();
+    whipPc     = whip.pc;
+    whipStream = whip.stream;
+
+    // 4. Wait for rtp/part1 to be active on ZLM
+    await waitForStream("rtp", "part1");
+
+    // 5. ZLM connects to server's RX port and pushes part1 audio in
+    await startSendRtp("rtp", "part1", 1111, "127.0.0.1", rxPort1);
+
+    // 6. Wait for rtp/part1back (server TX → ZLM via port1back)
+    await waitForStream("rtp", "part1back");
+
+    // 7. Part 2: same split pattern
+    const port2back = await openRtpServer("part2back");
+    const passiveRes2 = await serverGet("/addPassiveAudioMeetPart", {
+      meetId, partId: "part2", ip: "127.0.0.1", port: port2back,
+    });
+    const rxPort2 = passiveRes2.data.port;
+    log(`addPassiveAudioMeetPart part2 ok → server RX port=${rxPort2}`);
+
+    await waitForStream("rtp", "part2");
+    await startSendRtp("rtp", "part2", 2222, "127.0.0.1", rxPort2);
+    await waitForStream("rtp", "part2back");
+
+    // 8. WHEP: play back mixed audio (part1back stream on ZLM)
+    whepPc = await whepPlay(document.getElementById("playback"));
+
+    document.getElementById("btnStop").disabled = false;
+    log("=== Meeting active ===");
+  } catch (e) {
+    log("ERROR: " + e.message);
+    await stopAll();
+    document.getElementById("btnStart").disabled = false;
+  }
+};
+
+// ---------------------------------------------------------------------------
+// Stop
+// ---------------------------------------------------------------------------
+
+document.getElementById("btnStop").onclick = async () => {
+  document.getElementById("btnStop").disabled = true;
+  await stopAll();
+  document.getElementById("btnStart").disabled = false;
+};
+
+async function stopAll() {
+  if (whipPc)     { whipPc.close();    whipPc = null; }
+  if (whipStream) { whipStream.getTracks().forEach(t => t.stop()); whipStream = null; }
+  if (whepPc)     { whepPc.close();    whepPc = null; }
+  document.getElementById("playback").srcObject = null;
+
+  if (meetId) {
+    try {
+      await serverGet("/destroyAudioMeet", { meetId });
+      log(`destroyAudioMeet ${meetId} ok`);
+    } catch (e) {
+      log("destroyAudioMeet error: " + e.message);
+    }
+    meetId = null;
+  }
+}
+</script>
+</body>
+</html>
