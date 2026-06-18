@@ -1,6 +1,5 @@
 #include "pjmedia_ctx.h"
-
-#include <iostream>
+#include "MsLog.h"
 
 bool PjMediaCtx::init()
 {
@@ -9,14 +8,14 @@ bool PjMediaCtx::init()
     status = pj_init();
     if (status != PJ_SUCCESS)
     {
-        std::cerr << "pj_init() failed: " << status << "\n";
+        MS_LOG_ERROR("pj_init() failed: %d", status);
         return false;
     }
 
     status = pjlib_util_init();
     if (status != PJ_SUCCESS)
     {
-        std::cerr << "pjlib_util_init() failed: " << status << "\n";
+        MS_LOG_ERROR("pjlib_util_init() failed: %d", status);
         pj_shutdown();
         return false;
     }
@@ -27,7 +26,7 @@ bool PjMediaCtx::init()
     status = pjmedia_endpt_create(&cp_.factory, NULL, 0, &endpt_);
     if (status != PJ_SUCCESS)
     {
-        std::cerr << "pjmedia_endpt_create() failed: " << status << "\n";
+        MS_LOG_ERROR("pjmedia_endpt_create() failed: %d", status);
         pj_caching_pool_destroy(&cp_);
         pj_shutdown();
         return false;

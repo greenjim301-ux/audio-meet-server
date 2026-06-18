@@ -10,6 +10,7 @@
 #include <random>
 #include <cstring>
 #include <iostream>
+#include "MsLog.h"
 
 Participant::Participant(std::string meet_id, std::string part_id, uint16_t port)
     : meet_id_(std::move(meet_id)), part_id_(std::move(part_id)), port_(port)
@@ -362,35 +363,58 @@ void Participant::rx_thread_func(int client_fd)
         if (!rtp.parse(pkt_buf.data(), pkt_len))
             continue;
 
-        // Prepend any carry-over bytes from the previous packet, then decode
-        // complete FRAME_SAMPLES-sized frames.  Leftover bytes that don't fill a
-        // full frame are saved in rx_leftover_ for the next iteration.
-        rx_leftover_.insert(rx_leftover_.end(),
-                            rtp.payload.begin(), rtp.payload.end());
+        // If there are no carry-over bytes, decode directly from the payload to
+        // avoid an unnecessary copy.  Otherwise append to rx_leftover_ first.
+        const uint8_t *src_data;
+        size_t src_size;
+        if (rx_leftover_.empty())
+        {
+            src_data = rtp.payload.data();
+            src_size = rtp.payload.size();
+        }
+        else
+        {
+            rx_leftover_.insert(rx_leftover_.end(),
+                                rtp.payload.begin(), rtp.payload.end());
+            src_data = rx_leftover_.data();
+            src_size = rx_leftover_.size();
+        }
 
         // std::cerr << "Received RTP packet: seq=" << rtp.sequence
         //           << " timestamp=" << rtp.timestamp
-        //           << " combined_size=" << rx_leftover_.size() << "\n";
+        //           << " combined_size=" << src_size << "\n";
 
-        const size_t n_full = rx_leftover_.size() / FRAME_SAMPLES;
+        const size_t n_full = src_size / FRAME_SAMPLES;
 
         std::array<int16_t, FRAME_SAMPLES> frame;
         for (size_t i = 0; i < n_full; ++i)
         {
-            const uint8_t *src = rx_leftover_.data() + i * FRAME_SAMPLES;
+            const uint8_t *src = src_data + i * FRAME_SAMPLES;
             for (int s = 0; s < FRAME_SAMPLES; ++s)
                 frame[s] = G711Alaw::decodeSample(src[s]);
             std::lock_guard<std::mutex> lk(rx_buf_mutex_);
+            if (static_cast<int>(rx_buf_.size()) >= MAX_RX_BUF_FRAMES)
+                rx_buf_.pop_front();
             rx_buf_.push_back(frame);
             if (!rx_started_ && rx_buf_.size() >= PREFETCH_FRAMES)
                 rx_started_ = true;
         }
 
-        // Keep only the trailing bytes that didn't fill a complete frame
+        // Keep only the trailing bytes that didn't fill a complete frame.
         const size_t consumed = n_full * FRAME_SAMPLES;
-        if (consumed > 0)
-            rx_leftover_.erase(rx_leftover_.begin(),
-                               rx_leftover_.begin() + static_cast<ptrdiff_t>(consumed));
+        if (rx_leftover_.empty())
+        {
+            // Fast path: copy only the (usually zero) trailing bytes.
+            const size_t leftover = src_size - consumed;
+            if (leftover > 0)
+                rx_leftover_.assign(src_data + consumed, src_data + src_size);
+        }
+        else
+        {
+            if (consumed > 0)
+                rx_leftover_.erase(rx_leftover_.begin(),
+                                   rx_leftover_.begin() + static_cast<ptrdiff_t>(consumed));
+        }
     }
 }
 
@@ -457,7 +481,7 @@ bool Participant::write_exact(int fd, const uint8_t *buf, size_t n)
         ssize_t w = ::send(fd, buf + sent, n - sent, MSG_NOSIGNAL);
         if (w <= 0)
         {
-            std::cerr << "Error writing to socket: " << strerror(errno) << " (" << w << ")\n";
+            MS_LOG_ERROR("Error writing to socket: %s (%zd)", strerror(errno), w);
             return false;
         }
         sent += static_cast<size_t>(w);

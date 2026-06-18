@@ -3,6 +3,7 @@
 #include "port_allocator.h"
 #include <pjlib.h>
 #include <string>
+#include <vector>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -18,6 +19,8 @@ public:
     bool destroy_meeting(const std::string &meet_id);
     bool add_passive_participant(const std::string &meet_id, const std::string &part_id,
                                  const std::string &ip, uint16_t port);
+    bool delete_participant(const std::string &meet_id, const std::string &part_id);
+    std::vector<std::shared_ptr<Meeting>> list_meetings() const;
     PortAllocator &port_allocator() { return *port_allocator_; }
 
 private:

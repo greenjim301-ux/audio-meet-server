@@ -48,6 +48,16 @@ std::shared_ptr<Meeting> MeetingManager::get_meeting(const std::string &meet_id)
     return it->second;
 }
 
+std::vector<std::shared_ptr<Meeting>> MeetingManager::list_meetings() const
+{
+    std::lock_guard<std::mutex> lk(mutex_);
+    std::vector<std::shared_ptr<Meeting>> result;
+    result.reserve(meetings_.size());
+    for (const auto &[id, meeting] : meetings_)
+        result.push_back(meeting);
+    return result;
+}
+
 bool MeetingManager::destroy_meeting(const std::string &meet_id)
 {
     pj_ensure_registered();
@@ -81,4 +91,19 @@ bool MeetingManager::add_passive_participant(const std::string &meet_id,
         return false;
     auto p = meeting->add_passive_participant(part_id, ip, port);
     return p != nullptr;
+}
+
+bool MeetingManager::delete_participant(const std::string &meet_id,
+                                        const std::string &part_id)
+{
+    pj_ensure_registered();
+    auto meeting = get_meeting(meet_id);
+    if (!meeting)
+        return false;
+    int port = meeting->remove_participant(part_id);
+    if (port < 0)
+        return false;
+    if (port > 0)
+        port_allocator_->release(static_cast<uint16_t>(port));
+    return true;
 }

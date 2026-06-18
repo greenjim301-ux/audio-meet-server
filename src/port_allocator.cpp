@@ -24,16 +24,18 @@ static bool is_port_available(uint16_t port)
 }
 
 PortAllocator::PortAllocator(uint16_t base, uint16_t count)
-    : base_(base), count_(count), used_(count, false) {}
+    : base_(base), count_(count), next_(0), used_(count, false) {}
 
 int PortAllocator::allocate()
 {
     std::lock_guard<std::mutex> lk(mutex_);
-    for (uint16_t i = 0; i < count_; ++i)
+    for (uint16_t j = 0; j < count_; ++j)
     {
+        uint16_t i = (next_ + j) % count_;
         if (!used_[i] && is_port_available(static_cast<uint16_t>(base_ + i)))
         {
             used_[i] = true;
+            next_ = (i + 1) % count_;
             return base_ + i;
         }
     }

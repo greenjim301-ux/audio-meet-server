@@ -17,6 +17,7 @@ set(SOURCES
     src/rtp_packet.cpp
     src/port_allocator.cpp
     src/pjmedia_ctx.cpp
+    src/MsLog.cpp
 )
 
 add_executable(audio-meet-server ${SOURCES})

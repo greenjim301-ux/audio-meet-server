@@ -4,7 +4,8 @@
 #include <vector>
 
 // Thread-safe port pool over a contiguous range [base, base+count)
-class PortAllocator {
+class PortAllocator
+{
 public:
     PortAllocator(uint16_t base, uint16_t count);
 
@@ -17,6 +18,7 @@ public:
 private:
     uint16_t base_;
     uint16_t count_;
+    uint16_t next_;
     std::vector<bool> used_;
     std::mutex mutex_;
 };

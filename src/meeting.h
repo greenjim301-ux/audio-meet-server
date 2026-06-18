@@ -2,6 +2,7 @@
 #include "participant.h"
 #include <pjmedia.h>
 #include <string>
+#include <vector>
 #include <map>
 #include <memory>
 #include <shared_mutex>
@@ -23,6 +24,14 @@ public:
                                                        uint16_t rx_port);
     std::shared_ptr<Participant> get_participant(const std::string &part_id) const;
     std::vector<uint16_t> participant_ports() const;
+    // Remove a single participant. Returns the participant's port (0 for passive)
+    // on success, or -1 if part_id is not found.
+    int remove_participant(const std::string &part_id);
+    // Mute (true) or unmute (false) the participant's microphone (rx direction).
+    // Returns 0 on success, -1 if part_id is not found.
+    const std::string &meet_id() const { return meet_id_; }
+    int set_participant_mute(const std::string &part_id, bool mute);
+    std::vector<std::shared_ptr<Participant>> participants() const;
     void stop();
 
 private:

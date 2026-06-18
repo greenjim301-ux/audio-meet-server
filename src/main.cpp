@@ -2,7 +2,7 @@
 #include "meeting_manager.h"
 #include "port_allocator.h"
 #include "pjmedia_ctx.h"
-
+#include "MsLog.h"
 #include <httplib.h>
 
 #include <iostream>
@@ -13,18 +13,21 @@ static void print_usage(const char *prog)
 {
     std::cerr
         << "Usage: " << prog << " [options]\n"
-        << "  --port <n>              HTTP listen port (default: 8080)\n"
+        << "  --port <n>              HTTP listen port (default: 20080)\n"
         << "  --listen-ip <ip>        IP reported to clients for TCP connections (default: 127.0.0.1)\n"
         << "  --port-range-start <n>  First TCP port in pool (default: 20000)\n"
-        << "  --port-range-size <n>   Number of ports in pool (default: 1000)\n";
+        << "  --port-range-size <n>   Number of ports in pool (default: 50)\n";
 }
 
 int main(int argc, char *argv[])
 {
-    int http_port = 8080;
-    std::string listen_ip = "127.0.0.1";
+    MsLog::Instance()->SetLevel(LOG_LEVEL_DEBUG);
+    MsLog::Instance()->Run();
+
+    int http_port = 20080;
+    std::string listen_ip = "10.20.30.21";
     uint16_t port_range_start = 20000;
-    uint16_t port_range_size = 1000;
+    uint16_t port_range_size = 80;
 
     for (int i = 1; i < argc; ++i)
     {
@@ -52,7 +55,7 @@ int main(int argc, char *argv[])
         }
         else
         {
-            std::cerr << "Unknown option: " << arg << "\n";
+            MS_LOG_ERROR("Unknown option: %s", arg.c_str());
             print_usage(argv[0]);
             return 1;
         }
@@ -63,7 +66,7 @@ int main(int argc, char *argv[])
     PjMediaCtx pj_ctx;
     if (!pj_ctx.init())
     {
-        std::cerr << "Failed to initialize PJMEDIA\n";
+        MS_LOG_ERROR("Failed to initialize PJMEDIA");
         return 1;
     }
 
@@ -73,14 +76,13 @@ int main(int argc, char *argv[])
     httplib::Server svr;
     api_server.register_routes(svr);
 
-    std::cout << "audio-meet-server listening on 0.0.0.0:" << http_port << "\n"
-              << "  client-facing IP: " << listen_ip << "\n"
-              << "  TCP port pool: " << port_range_start
-              << " - " << (port_range_start + port_range_size - 1) << "\n";
+    MS_LOG_INFO("audio-meet-server listening on 0.0.0.0:%d", http_port);
+    MS_LOG_INFO("  client-facing IP: %s", listen_ip.c_str());
+    MS_LOG_INFO("  TCP port pool: %d - %d", port_range_start, port_range_start + port_range_size - 1);
 
     if (!svr.listen("0.0.0.0", http_port))
     {
-        std::cerr << "Failed to start HTTP server on port " << http_port << "\n";
+        MS_LOG_ERROR("Failed to start HTTP server on port %d", http_port);
         pj_ctx.destroy();
         return 1;
     }

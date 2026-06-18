@@ -1,6 +1,5 @@
 #include "meeting.h"
-
-#include <iostream>
+#include "MsLog.h"
 
 static constexpr unsigned MEETING_CONF_SLOTS = 32;
 
@@ -20,7 +19,7 @@ Meeting::Meeting(std::string meet_id, pj_pool_factory *pool_factory)
     pool_ = pj_pool_create(pool_factory, meet_id_.c_str(), 4000, 4000, NULL);
     if (!pool_)
     {
-        std::cerr << "Meeting: pj_pool_create failed for " << meet_id_ << "\n";
+        MS_LOG_ERROR("Meeting: pj_pool_create failed for %s", meet_id_.c_str());
         return;
     }
 
@@ -29,7 +28,7 @@ Meeting::Meeting(std::string meet_id, pj_pool_factory *pool_factory)
                                          PJMEDIA_CONF_NO_DEVICE, &conf_);
     if (st != PJ_SUCCESS)
     {
-        std::cerr << "Meeting: pjmedia_conf_create failed: " << st << "\n";
+        MS_LOG_ERROR("Meeting: pjmedia_conf_create failed: %d", st);
         pj_pool_release(pool_);
         pool_ = nullptr;
         return;
@@ -44,7 +43,7 @@ Meeting::Meeting(std::string meet_id, pj_pool_factory *pool_factory)
                                             this, &clock_);
     if (cst != PJ_SUCCESS)
     {
-        std::cerr << "Meeting: pjmedia_clock_create2 failed: " << cst << "\n";
+        MS_LOG_ERROR("Meeting: pjmedia_clock_create2 failed: %d", cst);
         pjmedia_conf_destroy(conf_);
         conf_ = nullptr;
         pj_pool_release(pool_);
@@ -97,7 +96,7 @@ std::shared_ptr<Participant> Meeting::add_participant(const std::string &part_id
 
     if (st != PJ_SUCCESS)
     {
-        std::cerr << "Meeting: pjmedia_conf_add_port failed: " << st << "\n";
+        MS_LOG_ERROR("Meeting: pjmedia_conf_add_port failed: %d", st);
         p->stop();
         return nullptr;
     }
@@ -139,7 +138,7 @@ std::shared_ptr<Participant> Meeting::add_passive_participant(
 
     if (st != PJ_SUCCESS)
     {
-        std::cerr << "Meeting: pjmedia_conf_add_port failed (passive): " << st << "\n";
+        MS_LOG_ERROR("Meeting: pjmedia_conf_add_port failed (passive): %d", st);
         p->stop();
         return nullptr;
     }
@@ -181,7 +180,7 @@ std::shared_ptr<Participant> Meeting::add_split_participant(
 
     if (st != PJ_SUCCESS)
     {
-        std::cerr << "Meeting: pjmedia_conf_add_port failed (split): " << st << "\n";
+        MS_LOG_ERROR("Meeting: pjmedia_conf_add_port failed (split): %d", st);
         p->stop();
         return nullptr;
     }
@@ -206,6 +205,16 @@ std::shared_ptr<Participant> Meeting::get_participant(const std::string &part_id
     return it->second.first;
 }
 
+std::vector<std::shared_ptr<Participant>> Meeting::participants() const
+{
+    std::shared_lock<std::shared_mutex> lk(parts_mutex_);
+    std::vector<std::shared_ptr<Participant>> result;
+    result.reserve(participants_.size());
+    for (const auto &[id, entry] : participants_)
+        result.push_back(entry.first);
+    return result;
+}
+
 std::vector<uint16_t> Meeting::participant_ports() const
 {
     std::shared_lock<std::shared_mutex> lk(parts_mutex_);
@@ -215,6 +224,50 @@ std::vector<uint16_t> Meeting::participant_ports() const
         if (entry.first->port() != 0)
             ports.push_back(entry.first->port());
     return ports;
+}
+
+int Meeting::set_participant_mute(const std::string &part_id, bool mute)
+{
+    pj_ensure_registered();
+    std::shared_lock<std::shared_mutex> lk(parts_mutex_);
+    auto it = participants_.find(part_id);
+    if (it == participants_.end())
+        return -1;
+
+    unsigned slot = it->second.second;
+    // Exclusive lock: block the clock thread during configure_port.
+    // Lock ordering (parts_mutex_ shared -> conf_mutex_ exclusive) is safe:
+    // the clock tick only ever holds conf_mutex_ shared.
+    std::unique_lock<std::shared_mutex> clk(conf_mutex_);
+    // pjmedia_conf_configure_port(conf_, slot, PJMEDIA_PORT_NO_CHANGE,
+    //                             mute ? PJMEDIA_PORT_MUTE : PJMEDIA_PORT_ENABLE);
+
+    pjmedia_conf_adjust_rx_level(conf_, slot, mute ? -128 : 0);
+    return 0;
+}
+
+int Meeting::remove_participant(const std::string &part_id)
+{
+    pj_ensure_registered();
+    std::shared_ptr<Participant> participant;
+    {
+        std::unique_lock<std::shared_mutex> lk(parts_mutex_);
+        auto it = participants_.find(part_id);
+        if (it == participants_.end())
+            return -1;
+
+        participant = it->second.first;
+        unsigned slot = it->second.second;
+        participants_.erase(it);
+
+        // Exclusive lock on conf_mutex_ blocks the clock thread during remove.
+        // Lock ordering (parts_mutex_ -> conf_mutex_) matches add_* methods.
+        std::unique_lock<std::shared_mutex> clk(conf_mutex_);
+        pjmedia_conf_remove_port(conf_, slot);
+    }
+    // Stop the participant outside all locks — thread joins can be slow.
+    participant->stop();
+    return static_cast<int>(participant->port());
 }
 
 void Meeting::stop()

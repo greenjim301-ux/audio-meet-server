@@ -47,6 +47,8 @@ public:
 
     uint16_t port() const { return port_; }
     const std::string &part_id() const { return part_id_; }
+    const std::string &remote_ip() const { return remote_ip_; }
+    uint16_t remote_port() const { return remote_port_; }
     bool is_passive() const { return port_ == 0 && !remote_ip_.empty(); }
     bool is_split() const { return port_ != 0 && !remote_ip_.empty(); }
 
@@ -85,6 +87,7 @@ private:
 
     // Prefetch buffer for inbound PCM frames (thread-safe)
     static constexpr int PREFETCH_FRAMES = 10;
+    static constexpr int MAX_RX_BUF_FRAMES = 50; // ~1 s; drop oldest when exceeded
     std::deque<std::array<int16_t, FRAME_SAMPLES>> rx_buf_;
     std::mutex rx_buf_mutex_;
     bool rx_started_ = true; // whether we've received enough frames to start outputting non-silence
