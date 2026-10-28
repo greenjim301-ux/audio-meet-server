@@ -257,14 +257,12 @@ pj_status_t Participant::on_put_frame(pjmedia_port *port, pjmedia_frame *frame)
 
     auto *self = static_cast<Participant *>(port->port_data.pdata);
 
+    // This is only a fast-path hint; recheck under the mutex before enqueueing.
+    if (!self->tx_active_.load(std::memory_order_relaxed) || self->stop_flag_.load())
     {
-        std::lock_guard<std::mutex> lk(self->queue_mutex_);
-        if (!self->tx_active_ || self->stop_flag_.load())
-        {
-            self->tx_acc_.clear();
-            self->tx_timestamp_ += FRAME_SAMPLES;
-            return PJ_SUCCESS;
-        }
+        self->tx_acc_.clear();
+        self->tx_timestamp_ += FRAME_SAMPLES;
+        return PJ_SUCCESS;
     }
 
     // if (self->is_split())

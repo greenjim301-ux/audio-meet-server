@@ -103,7 +103,8 @@ private:
     std::mutex queue_mutex_;
     std::condition_variable queue_cv_;
     std::deque<std::vector<uint8_t>> send_queue_;
-    bool tx_active_ = false; // protected by queue_mutex_; false before connect/after exit
+    // Lock-free early reads; writes stay under queue_mutex_ with queue cleanup.
+    std::atomic<bool> tx_active_{false};
 
     // RTP state for outgoing packets
     uint16_t tx_seq_ = 0;
