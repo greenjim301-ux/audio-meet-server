@@ -99,7 +99,7 @@ bool Participant::startPassive()
 
     client_fd_ = fd;
     rx_thread_ = std::thread(&Participant::rx_thread_func, this, fd);
-    tx_thread_ = std::thread(&Participant::tx_thread_func, this, fd);
+    start_tx_thread(fd);
     return true;
 }
 
@@ -158,7 +158,7 @@ bool Participant::startSplit()
     }
 
     client_fd_ = tx_fd;
-    tx_thread_ = std::thread(&Participant::tx_thread_func, this, tx_fd);
+    start_tx_thread(tx_fd);
     accept_thread_ = std::thread(&Participant::accept_thread_func, this);
     return true;
 }
@@ -170,6 +170,8 @@ void Participant::stop()
     // Wake queue_cv_ so tx thread can exit
     {
         std::lock_guard<std::mutex> lk(queue_mutex_);
+        tx_active_ = false;
+        send_queue_.clear();
         queue_cv_.notify_all();
     }
 
@@ -255,6 +257,16 @@ pj_status_t Participant::on_put_frame(pjmedia_port *port, pjmedia_frame *frame)
 
     auto *self = static_cast<Participant *>(port->port_data.pdata);
 
+    {
+        std::lock_guard<std::mutex> lk(self->queue_mutex_);
+        if (!self->tx_active_ || self->stop_flag_.load())
+        {
+            self->tx_acc_.clear();
+            self->tx_timestamp_ += FRAME_SAMPLES;
+            return PJ_SUCCESS;
+        }
+    }
+
     // if (self->is_split())
     // {
     //     std::cerr << "on_put_frame called with frame size " << frame->size << "\n";
@@ -284,7 +296,7 @@ pj_status_t Participant::on_put_frame(pjmedia_port *port, pjmedia_frame *frame)
     // Always advance the real-time RTP clock.
     self->tx_timestamp_ += FRAME_SAMPLES;
 
-    // Only emit a packet once TX_BATCH_FRAMES frames have accumulated (800 bytes).
+    // Only emit a packet once TX_BATCH_FRAMES frames have accumulated (320 bytes).
     if (self->tx_acc_.size() < static_cast<size_t>(TX_BATCH_FRAMES * FRAME_SAMPLES))
         return PJ_SUCCESS;
 
@@ -303,6 +315,11 @@ pj_status_t Participant::on_put_frame(pjmedia_port *port, pjmedia_frame *frame)
     //     std::cerr << "Enqueued packet of length " << bytes.size() << " to send queue for remote endpoint " << self->remote_ip_ << ":" << self->remote_port_ << "\n";
     // }
     std::lock_guard<std::mutex> lk(self->queue_mutex_);
+    // The sender may have exited while this packet was being encoded.
+    if (!self->tx_active_ || self->stop_flag_.load())
+        return PJ_SUCCESS;
+    if (self->send_queue_.size() >= MAX_SEND_QUEUE_PACKETS)
+        self->send_queue_.pop_front();
     self->send_queue_.push_back(std::move(bytes));
     self->queue_cv_.notify_one();
     return PJ_SUCCESS;
@@ -334,7 +351,7 @@ void Participant::accept_thread_func()
         // Active mode: accepted fd is bidirectional
         client_fd_ = fd;
         rx_thread_ = std::thread(&Participant::rx_thread_func, this, fd);
-        tx_thread_ = std::thread(&Participant::tx_thread_func, this, fd);
+        start_tx_thread(fd);
     }
 }
 
@@ -418,6 +435,15 @@ void Participant::rx_thread_func(int client_fd)
     }
 }
 
+void Participant::start_tx_thread(int client_fd)
+{
+    std::lock_guard<std::mutex> lk(queue_mutex_);
+    if (stop_flag_.load())
+        return;
+    tx_active_ = true;
+    tx_thread_ = std::thread(&Participant::tx_thread_func, this, client_fd);
+}
+
 void Participant::tx_thread_func(int client_fd)
 {
     // if (is_split())
@@ -432,7 +458,7 @@ void Participant::tx_thread_func(int client_fd)
             std::unique_lock<std::mutex> lk(queue_mutex_);
             queue_cv_.wait(lk, [this]
                            { return stop_flag_.load() || !send_queue_.empty(); });
-            if (stop_flag_.load() && send_queue_.empty())
+            if (stop_flag_.load())
                 break;
             pkt = std::move(send_queue_.front());
             send_queue_.pop_front();
@@ -454,10 +480,10 @@ void Participant::tx_thread_func(int client_fd)
             break;
     }
 
-    // if (is_split())
-    // {
-    //     std::cerr << "TX thread exiting for remote endpoint " << remote_ip_ << ":" << remote_port_ << "\n";
-    // }
+    // Serialize this with the producer so it cannot enqueue after cleanup.
+    std::lock_guard<std::mutex> lk(queue_mutex_);
+    tx_active_ = false;
+    send_queue_.clear();
 }
 
 bool Participant::read_exact(int fd, uint8_t *buf, size_t n)

@@ -7,6 +7,7 @@
 #include <condition_variable>
 #include <atomic>
 #include <cstdint>
+#include <array>
 
 #include <pjmedia.h>
 
@@ -56,6 +57,7 @@ private:
     void accept_thread_func();
     void rx_thread_func(int client_fd);
     void tx_thread_func(int client_fd);
+    void start_tx_thread(int client_fd);
 
     // Read exactly n bytes from fd; returns false on error/EOF
     static bool read_exact(int fd, uint8_t *buf, size_t n);
@@ -95,10 +97,13 @@ private:
     // Carry-over G.711 bytes from the previous RTP packet (only accessed from rx_thread)
     std::vector<uint8_t> rx_leftover_;
 
-    // Send queue (populated by on_put_frame, drained by tx thread)
+    // Send queue (populated by on_put_frame, drained by tx thread).
+    // Drop stale audio beyond one second, including when send() is blocked.
+    static constexpr size_t MAX_SEND_QUEUE_PACKETS = 25;
     std::mutex queue_mutex_;
     std::condition_variable queue_cv_;
     std::deque<std::vector<uint8_t>> send_queue_;
+    bool tx_active_ = false; // protected by queue_mutex_; false before connect/after exit
 
     // RTP state for outgoing packets
     uint16_t tx_seq_ = 0;

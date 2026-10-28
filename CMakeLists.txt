@@ -68,3 +68,18 @@ target_compile_definitions(audio-meet-server PRIVATE
 target_compile_options(audio-meet-server PRIVATE -Wall -Wextra)
 
 target_compile_options(audio-meet-server PRIVATE -Wall -Wextra -Wpedantic)
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(participant-send-test
+        tests/participant_send_test.cpp
+        src/participant.cpp src/rtp_packet.cpp src/pjmedia_ctx.cpp src/MsLog.cpp
+    )
+    target_include_directories(participant-send-test PRIVATE src third_party/include /usr/local/include)
+    target_link_directories(participant-send-test PRIVATE /usr/local/lib)
+    target_link_libraries(participant-send-test PRIVATE ${PJSIP_LIBS} pthread m rt asound ssl crypto uuid)
+    target_compile_definitions(participant-send-test PRIVATE PJ_AUTOCONF=1 PJ_IS_BIG_ENDIAN=0 PJ_IS_LITTLE_ENDIAN=1)
+    target_compile_options(participant-send-test PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME participant-send COMMAND participant-send-test)
+    set_tests_properties(participant-send PROPERTIES TIMEOUT 30)
+endif()
